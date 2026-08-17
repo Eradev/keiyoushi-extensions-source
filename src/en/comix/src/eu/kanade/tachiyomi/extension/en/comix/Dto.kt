@@ -96,6 +96,11 @@ class Manga(
             }
         }
 
+    fun slug(): String? = url
+        ?.substringAfter("/title")
+        ?.trimStart('/')
+        ?.takeIf { it.isNotEmpty() }
+
     fun toSManga(
         posterQuality: String?,
         altTitlesInDesc: Boolean = false,
@@ -103,7 +108,7 @@ class Manga(
         showExtraInfo: Boolean = true,
         showTags: Boolean = false,
     ) = SManga.create().apply {
-        url = this@Manga.url?.substringAfter("/title") ?: "/$hid"
+        url = "/$hid"
         memo = buildJsonObject { put(MANGA_ID_MEMO, hid) }
         title = this@Manga.title
 
@@ -164,7 +169,7 @@ class Manga(
     }
 
     fun toBasicSManga(posterQuality: String?) = SManga.create().apply {
-        url = this@Manga.url?.substringAfter("/title") ?: "/$hid"
+        url = "/$hid"
         memo = buildJsonObject { put(MANGA_ID_MEMO, hid) }
         title = this@Manga.title
         thumbnail_url = this@Manga.poster?.from(posterQuality)
