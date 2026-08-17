@@ -27,8 +27,10 @@ import keiyoushi.utils.int
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.runWebView
 import keiyoushi.utils.string
+import keiyoushi.utils.toJsonString
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
@@ -238,6 +240,7 @@ abstract class Comix :
             },
         ).parseAs<SearchResponse>()
 
+        rememberSlugs(searchResponse.result.items)
         val mangaList = searchResponse.result.items.map {
             it.toBasicSManga(preferences.posterQuality())
         }
@@ -385,7 +388,10 @@ abstract class Comix :
         var cachedDocument: Document? = null
         suspend fun getDocument(): Document {
             cachedDocument?.let { return it }
-            return client.get(getMangaUrl(manga)).asJsoup().also { cachedDocument = it }
+            return client.get(getMangaUrl(manga)).asJsoup().also { document ->
+                cachedDocument = document
+                runCatching { rememberSlugFromDocument(document) }
+            }
         }
 
         val deduplicateChapters = preferences.deduplicateChapters()
@@ -438,7 +444,9 @@ abstract class Comix :
             ?.value
             ?: throw Exception("Could not find manga detail in queries")
 
-        return detail.parseAs<Manga>().toSManga(
+        val parsed = detail.parseAs<Manga>()
+        rememberSlugs(listOf(parsed))
+        return parsed.toSManga(
             preferences.posterQuality(),
             preferences.alternativeNamesInDescription(),
             preferences.scorePosition(),
@@ -447,7 +455,7 @@ abstract class Comix :
         )
     }
 
-    override fun getMangaUrl(manga: SManga): String = "$baseUrl/title${manga.url}"
+    override fun getMangaUrl(manga: SManga): String = "$baseUrl/title/${resolvedSlug(manga)}"
 
     private fun SManga.mangaId(): String? = memo[MANGA_ID_MEMO]?.string
         ?: getMangaUrl(this).toHttpUrlOrNull()
@@ -484,7 +492,7 @@ abstract class Comix :
         document: Document,
         latestChapterId: Int?,
     ): List<SChapter> {
-        val mangaSlug = manga.url.removePrefix("/")
+        val mangaSlug = resolvedSlug(manga)
         val mangaId = manga.mangaId() ?: throw Exception("Refresh manga details")
         val webViewDocument = document.clone()
         val mainScript = webViewDocument.selectFirst(
@@ -1051,6 +1059,54 @@ abstract class Comix :
 
     private fun SharedPreferences.blockedGenres(): Set<String> = getStringSet(PREF_BLOCKED_GENRES, emptySet()) ?: emptySet()
 
+    private fun mangaHid(manga: SManga): String = manga.url.removePrefix("/").substringBefore("-")
+
+    private fun resolvedSlug(manga: SManga): String {
+        val hid = mangaHid(manga)
+        val storedPath = manga.url.removePrefix("/")
+        return preferences.slugMap[hid]
+            ?: storedPath.takeIf { '-' in it }
+            ?: hid
+    }
+
+    private fun rememberSlugs(mangas: Iterable<Manga>) {
+        val updates = buildMap {
+            for (item in mangas) {
+                item.slug()?.let { put(item.hid, it) }
+            }
+        }
+        if (updates.isEmpty()) return
+        val map = preferences.slugMap
+        if (updates.all { map[it.key] == it.value }) return
+        preferences.slugMap = map + updates
+    }
+
+    private fun rememberSlugFromDocument(document: Document) {
+        val initialData = document.selectFirst("script#initial-data")?.data() ?: return
+        val queries = initialData.parseAs<JsonObject>()["queries"] as? JsonObject ?: return
+        val detail = queries.entries.firstOrNull { (key, _) -> key.contains("\"detail\"") }
+            ?.value
+            ?: return
+        rememberSlugs(listOf(detail.parseAs<Manga>()))
+    }
+
+    private var slugMapCache: Map<String, String>? = null
+    private var SharedPreferences.slugMap: Map<String, String>
+        get() {
+            slugMapCache?.let { return it }
+            val json = getString(SLUG_MAP, "{}")!!
+            slugMapCache = try {
+                json.parseAs<Map<String, String>>()
+            } catch (_: SerializationException) {
+                emptyMap()
+            }
+            return slugMapCache!!
+        }
+        set(map) {
+            slugMapCache = map
+            edit().putString(SLUG_MAP, map.toJsonString()).apply()
+        }
+
     // The legacy "Hide NSFW" boolean still exists in some users' preferences;
     // map it to a sensible default until they pick a value explicitly.
     private fun SharedPreferences.contentRating(): String {
@@ -1077,6 +1133,7 @@ abstract class Comix :
         private const val PREF_SHOW_EXTRA_INFO = "pref_show_extra_info"
         private const val PREF_SHOW_TAGS_IN_GENRES = "pref_show_tags_in_genres"
         private const val PREF_SCORE_POSITION = "pref_score_position"
+        private const val SLUG_MAP = "slugMap"
 
         private const val DEFAULT_CONTENT_RATING = "suggestive"
         private const val WEBVIEW_TIMEOUT_SECONDS = 120L
