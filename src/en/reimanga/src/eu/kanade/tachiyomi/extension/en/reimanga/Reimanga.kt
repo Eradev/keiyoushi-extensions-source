@@ -22,13 +22,14 @@ import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonElement
 import keiyoushi.utils.tryParse
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
-import okhttp3.Protocol
 import okio.IOException
 import kotlin.time.Instant
 
@@ -39,7 +40,6 @@ abstract class Reimanga :
 
     override fun OkHttpClient.Builder.configureClient() = apply {
         addCookie("showAdultContent" to "true")
-        protocols(listOf(Protocol.HTTP_1_1))
     }
 
     private val preferences by getPreferencesLazy()
@@ -132,20 +132,30 @@ abstract class Reimanga :
         chapters: List<SChapter>,
         fetchDetails: Boolean,
         fetchChapters: Boolean,
-    ): SMangaUpdate {
+    ): SMangaUpdate = coroutineScope {
         val requestId = manga.memo.getLongOrNull(MANGA_ID_MEMO)
             ?: manga.url.substringAfterLast("-").toLong()
 
-        var apiManga = client.get("$baseUrl/api/manga/$requestId")
-            .parseAs<MangaPage>()
-            .manga
-
-        // DMCA / duplicate entries point at a main series with real metadata & chapters
-        if (apiManga.resolvedId != requestId) {
-            apiManga = client.get("$baseUrl/api/manga/${apiManga.resolvedId}")
+        val apiMangaDeferred = async {
+            var result = client.get("$baseUrl/api/manga/$requestId")
                 .parseAs<MangaPage>()
                 .manga
+
+            // DMCA / duplicate entries point at a main series with real metadata & chapters
+            if (result.resolvedId != requestId) {
+                result = client.get("$baseUrl/api/manga/${result.resolvedId}")
+                    .parseAs<MangaPage>()
+                    .manga
+            }
+            result
         }
+
+        val chaptersDeferred = async {
+            if (!fetchChapters) return@async chapters
+            parseChapterList(client.get(getMangaUrl(manga), rscHeaders).extractNextJs())
+        }
+
+        val apiManga = apiMangaDeferred.await()
 
         val updatedManga = if (fetchDetails) {
             apiManga.toSManga(baseUrl)
@@ -156,12 +166,17 @@ abstract class Reimanga :
         }
 
         val updatedChapters = if (fetchChapters) {
-            parseChapterList(client.get(apiManga.chapterPageUrl(baseUrl), rscHeaders).extractNextJs())
+            val chapterPageUrl = apiManga.chapterPageUrl(baseUrl)
+            if (chapterPageUrl != getMangaUrl(manga)) {
+                parseChapterList(client.get(chapterPageUrl, rscHeaders).extractNextJs())
+            } else {
+                chaptersDeferred.await()
+            }
         } else {
             chapters
         }
 
-        return SMangaUpdate(updatedManga, updatedChapters)
+        SMangaUpdate(updatedManga, updatedChapters)
     }
 
     private fun parseChapterList(data: ChapterList?): List<SChapter> {
