@@ -78,11 +78,17 @@ class ChapterItem(
     private val title: String?,
     private val slug: String,
     private val publishedAt: String?,
-    private val coinPrice: Int?,
-    private val purchased: Boolean?,
+    private val coinPrice: Int? = null,
+    private val effectiveCoinPrice: Int? = null,
+    private val purchased: Boolean? = null,
+    private val isEarlyAccess: Boolean? = null,
 ) {
     val isLocked: Boolean
-        get() = purchased == false && coinPrice != 0
+        get() {
+            if (purchased == true) return false
+            val price = effectiveCoinPrice ?: coinPrice ?: 0
+            return price > 0 || isEarlyAccess == true
+        }
 
     fun toSChapter(mangaSlug: String): SChapter = SChapter.create().apply {
         url = "$mangaSlug/$slug"

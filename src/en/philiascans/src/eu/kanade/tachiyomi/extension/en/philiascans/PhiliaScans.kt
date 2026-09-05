@@ -97,7 +97,7 @@ abstract class PhiliaScans :
     override fun chapterListRequest(manga: SManga): Request = GET("$apiUrl/manga/${manga.url}/chapters", headers)
 
     override fun chapterListParse(response: Response): List<SChapter> {
-        val hideLocked = preferences.getBoolean(HIDE_LOCKED_PREF_KEY, false)
+        val hideLocked = preferences.getBoolean(HIDE_LOCKED_PREF_KEY, true)
         val slug = response.request.url.pathSegments[2]
         return response.parseAs<ChapterResponse>().items
             .filter { !hideLocked || !it.isLocked }
@@ -164,7 +164,7 @@ abstract class PhiliaScans :
             key = HIDE_LOCKED_PREF_KEY
             title = "Hide Locked Chapters"
             summary = "Hide chapters that require coins to read."
-            setDefaultValue(false)
+            setDefaultValue(true)
         }.also(screen::addPreference)
     }
 
