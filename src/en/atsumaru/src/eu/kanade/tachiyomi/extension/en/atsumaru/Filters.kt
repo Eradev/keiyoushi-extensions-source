@@ -2,16 +2,11 @@ package eu.kanade.tachiyomi.extension.en.atsumaru
 
 import eu.kanade.tachiyomi.source.model.Filter
 
-internal class GenreFilter(genres: List<Genre>, excludedIds: Set<String> = emptySet()) :
+internal class GenreFilter(genres: List<Genre>) :
     Filter.Group<Filter.TriState>(
         "Genres",
         genres.map { genre ->
-            val state = if (genre.id in excludedIds) {
-                Filter.TriState.STATE_EXCLUDE
-            } else {
-                Filter.TriState.STATE_IGNORE
-            }
-            object : Filter.TriState(genre.name, state) {}
+            object : Filter.TriState(genre.name) {}
         },
     ) {
     val genreIds = genres.map { it.id }
@@ -22,12 +17,11 @@ internal class TagFilters(tags: List<Tag>) :
     Filter.Group<TagFilter>(
         "Tags",
         tags.sortedBy { it.name }.groupBy {
-
-            val c = it.name.firstOrNull()?.uppercase()
+            val c = it.name.firstOrNull()?.uppercaseChar()
 
             when {
-                c == null || c !in "A".."Z" -> "0-9"
-                else -> c
+                c == null || c !in 'A'..'Z' -> "0-9"
+                else -> c.toString()
             }
         }.map { (letters, tagsChunk) ->
             TagFilter(letters, tagsChunk)
@@ -35,14 +29,18 @@ internal class TagFilters(tags: List<Tag>) :
     )
 
 internal class TagFilter(letters: String, tags: List<Tag>) :
-    Filter.Group<Filter.TriState>(
+    Filter.Group<TagTriState>(
         letters,
         tags.map { tag ->
-            object : Filter.TriState(tag.name) {}
+            TagTriState(tag.name, tag.id, tag.requiresAdult)
         },
-    ) {
-    val tagIds = tags.map { it.id }
-}
+    )
+
+internal class TagTriState(
+    name: String,
+    val id: String,
+    val requiresAdult: Boolean,
+) : Filter.TriState(name)
 
 internal class TypeFilter(types: List<Type>) :
     Filter.Group<Filter.CheckBox>(
@@ -83,10 +81,14 @@ internal class AdultFilter(state: Boolean) : Filter.CheckBox("Show Adult Content
 
 internal class OfficialFilter : Filter.CheckBox("Only Official Translations", false)
 
-internal data class Genre(val name: String, val id: String)
+internal class Genre(val name: String, val id: String)
 
-internal data class Tag(val name: String, val id: String)
+internal class Tag(
+    val name: String,
+    val id: String,
+    val requiresAdult: Boolean = false,
+)
 
-internal data class Type(val name: String, val id: String)
+internal class Type(val name: String, val id: String)
 
-internal data class Status(val name: String, val id: String)
+internal class Status(val name: String, val id: String)

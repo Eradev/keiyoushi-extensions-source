@@ -54,13 +54,13 @@ class MangaDto(
     private val title: String,
     @JsonNames("poster", "image")
     private val imagePath: JsonElement,
-    private val largeImage: String?,
+    private val largeImage: String? = null,
 
     // Details
     private val authors: JsonElement? = null,
     private val synopsis: String? = null,
-    @JsonNames("genres", "tags")
     private val genres: JsonElement? = null,
+    private val tags: JsonElement? = null,
     private val released: Long? = null,
     private val status: String? = null,
     private val type: String? = null,
@@ -155,7 +155,8 @@ class MangaDto(
         genre = buildList {
             type?.let { add(it) }
             addAll(parseNames(genres))
-        }.joinToString()
+            addAll(parseNames(tags))
+        }.distinct().joinToString()
 
         val authorsList = parseAuthorsWithType(authors)
         author = authorsList.filter { it.second == "Author" || it.second == null }.joinToString { it.first }
@@ -232,9 +233,27 @@ class FilterData(
     val types: List<Filter>?,
     val statuses: List<Filter>?,
 ) {
-    fun getFilterList(excludedGenreIds: Set<String> = emptySet()) = buildList {
-        genres?.let { add(GenreFilter(it.map { Genre(it.name, it.id) }, excludedGenreIds)) }
-        tags?.let { add(TagFilters(it.map { Tag(it.name, it.id) })) }
+    fun getFilterList() = buildList {
+        genres?.let { add(GenreFilter(it.map { Genre(it.name, it.id) })) }
+        tags?.let { allTags ->
+            // Older caches round-tripped through a DTO that dropped counts; force a refetch.
+            check(allTags.isEmpty() || allTags.any { it.safeCount > 0 || it.adultCount > 0 }) {
+                "Stale filter cache missing tag counts"
+            }
+            add(
+                TagFilters(
+                    allTags
+                        .filter { it.safeCount > 0 || it.adultCount > 0 }
+                        .map { tag ->
+                            Tag(
+                                name = tag.name,
+                                id = tag.id,
+                                requiresAdult = tag.safeCount == 0,
+                            )
+                        },
+                ),
+            )
+        }
         types?.let { add(TypeFilter(it.map { Type(it.name, it.id) })) }
         statuses?.let { add(StatusFilter(it.map { Status(it.name, it.id) })) }
     }
@@ -244,4 +263,7 @@ class FilterData(
 class Filter(
     val id: String,
     val name: String,
+    val adult: Boolean = false,
+    val safeCount: Int = 0,
+    val adultCount: Int = 0,
 )

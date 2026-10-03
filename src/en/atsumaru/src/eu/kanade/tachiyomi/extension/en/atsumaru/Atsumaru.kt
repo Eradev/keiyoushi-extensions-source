@@ -19,7 +19,6 @@ import keiyoushi.source.KeiSource
 import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
-import keiyoushi.utils.toJsonElement
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.serialization.json.JsonElement
@@ -72,8 +71,27 @@ abstract class Atsumaru :
     // =============================== Search ===============================
 
     override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
+        var searchQuery = query
+        var clickGenreId: String? = null
+        var clickTagId: String? = null
+        var adultRequiredByTags = false
+        if (query.isNotBlank()) {
+            when (val match = resolveGenreOrTag(query.trim())) {
+                is GenreOrTag.Genre -> {
+                    clickGenreId = match.id
+                    searchQuery = ""
+                }
+                is GenreOrTag.Tag -> {
+                    clickTagId = match.id
+                    adultRequiredByTags = match.requiresAdult
+                    searchQuery = ""
+                }
+                null -> {}
+            }
+        }
+
         val url = "$baseUrl/collections/manga/documents/search".toHttpUrl().newBuilder().apply {
-            addQueryParameter("q", query.ifEmpty { "*" })
+            addQueryParameter("q", searchQuery.ifEmpty { "*" })
 
             val filterBy = mutableListOf<String>()
             filterBy.add("hidden:!=true")
@@ -86,9 +104,12 @@ abstract class Atsumaru :
             val statuses = mutableListOf<String>()
             var year: Int? = null
             var minChapters: Int? = null
-            var showAdult = false
+            var showAdult = get18Mode().isNotEmpty()
             var officialTranslation = false
             var sortBy = ""
+
+            clickGenreId?.let { includedGenres.add(it) }
+            clickTagId?.let { includedTags.add(it) }
 
             filters.forEach { filter ->
                 when (filter) {
@@ -103,10 +124,13 @@ abstract class Atsumaru :
 
                     is TagFilters -> {
                         filter.state.forEach { letter ->
-                            letter.state.forEachIndexed { index, state ->
-                                when (state.state) {
-                                    Filter.TriState.STATE_INCLUDE -> includedTags.add(letter.tagIds[index])
-                                    Filter.TriState.STATE_EXCLUDE -> excludedTags.add(letter.tagIds[index])
+                            letter.state.forEach { tag ->
+                                when (tag.state) {
+                                    Filter.TriState.STATE_INCLUDE -> {
+                                        includedTags.add(tag.id)
+                                        if (tag.requiresAdult) adultRequiredByTags = true
+                                    }
+                                    Filter.TriState.STATE_EXCLUDE -> excludedTags.add(tag.id)
                                 }
                             }
                         }
@@ -156,7 +180,7 @@ abstract class Atsumaru :
             if (includedGenres.isNotEmpty()) {
                 filterBy.add(includedGenres.joinToString(" && ") { "genreIds:=`$it`" })
             }
-            if (excludedGenres.isNotEmpty()) {
+            if (excludedGenres.isNotEmpty() && !adultRequiredByTags) {
                 filterBy.add("genreIds:!=[${excludedGenres.joinToString(",") { "`$it`" }}]")
             }
 
@@ -184,14 +208,14 @@ abstract class Atsumaru :
             }
 
             if (!showAdult) {
-                filterBy.add("isAdult:=$showAdult")
+                filterBy.add("isAdult:=false")
+                filterBy.add("mbContentRating:!=[`Pornographic`]")
             }
 
             if (officialTranslation) {
-                filterBy.add("officialTranslation:=$officialTranslation")
+                filterBy.add("officialTranslation:=true")
             }
 
-            filterBy.add("(mbContentRating:=[`Safe`,`Suggestive`,`Erotica`] || mbContentRating:!=*)")
             filterBy.add("medium:!=[`Novel`]")
             filterBy.add("views:>0")
 
@@ -201,10 +225,10 @@ abstract class Atsumaru :
                 addQueryParameter("sort_by", sortBy)
             }
 
-            if (query.isNotEmpty()) {
-                addQueryParameter("query_by", "title,englishTitle,otherNames,authors")
-                addQueryParameter("query_by_weights", "4,3,2,1")
-                addQueryParameter("num_typos", "4,3,2,1")
+            if (searchQuery.isNotEmpty()) {
+                addQueryParameter("query_by", "title,englishTitle,otherNames,authors,acronyms")
+                addQueryParameter("query_by_weights", "4,3,2,2,1")
+                addQueryParameter("num_typos", "4,3,2,1,0")
             }
 
             addQueryParameter("page", page.toString())
@@ -220,6 +244,42 @@ abstract class Atsumaru :
             val data = body.parseAs<BrowseMangaDto>()
             MangasPage(data.items.map { it.toSManga(baseUrl) }, true)
         }
+    }
+
+    private sealed class GenreOrTag {
+        class Genre(val id: String) : GenreOrTag()
+        class Tag(val id: String, val requiresAdult: Boolean) : GenreOrTag()
+    }
+
+    private suspend fun resolveGenreOrTag(name: String): GenreOrTag? {
+        getFilterList().forEach { filter ->
+            when (filter) {
+                is GenreFilter -> {
+                    filter.state.forEachIndexed { index, state ->
+                        if (state.name.equals(name, ignoreCase = true)) {
+                            return GenreOrTag.Genre(filter.genreIds[index])
+                        }
+                    }
+                }
+                is TagFilters -> {
+                    filter.state.forEach { letter ->
+                        letter.state.forEach { tag ->
+                            if (tag.name.equals(name, ignoreCase = true)) {
+                                return GenreOrTag.Tag(tag.id, tag.requiresAdult)
+                            }
+                        }
+                    }
+                }
+                else -> {}
+            }
+        }
+
+        val data = client.get("$baseUrl/api/explore/availableFilters").parseAs<FilterData>()
+        data.genres?.firstOrNull { it.name.equals(name, ignoreCase = true) }
+            ?.let { return GenreOrTag.Genre(it.id) }
+        data.tags?.firstOrNull { it.name.equals(name, ignoreCase = true) }
+            ?.let { return GenreOrTag.Tag(it.id, requiresAdult = it.safeCount == 0) }
+        return null
     }
 
     override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
@@ -239,14 +299,10 @@ abstract class Atsumaru :
 
     override val supportsFilterFetching = true
 
-    override suspend fun fetchFilterData(): JsonElement {
-        val filters = client.get("$baseUrl/api/explore/availableFilters").parseAs<FilterData>()
-        return filters.toJsonElement()
-    }
+    override suspend fun fetchFilterData(): JsonElement = client.get("$baseUrl/api/explore/availableFilters").parseAs()
 
     override fun getFilterList(data: JsonElement?): FilterList {
-        val excludedGenres = prefs.getStringSet(PREF_EXCLUDE_GENRES, emptySet()).orEmpty()
-        val filters = data?.parseAs<FilterData>()?.getFilterList(excludedGenres).orEmpty()
+        val filters = data?.parseAs<FilterData>()?.getFilterList().orEmpty()
 
         return FilterList(
             filters + listOf(
